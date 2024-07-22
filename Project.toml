@@ -1,0 +1,8 @@
+name = "LibOED"
+uuid = "5b7da22e-4144-421b-aa9d-5cbc40d39d8c"
+authors = ["Christopher Kelly <ckelly@bnl.gov>"]
+version = "0.1.0"
+
+[deps]
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
