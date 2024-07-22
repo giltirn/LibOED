@@ -62,7 +62,7 @@ function test_inference()
         println(y[:,s])
     end
     
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y;  chain_length=100)
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std])
     show(stdout,"text/plain",inf)
 end
 
