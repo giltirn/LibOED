@@ -62,13 +62,19 @@ function test_inference()
         println(y[:,s])
     end
 
+    try
+        inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing)
+    catch e
+        println("Got expected error: ",e)
+    end
+        
     #Test with dist_properties
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std])
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std], param_dist_properties=nothing)
     println("Test with dist_properties")
     show(stdout,"text/plain",inf)
 
     #Test with param_dist_properties
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=Array{Function,1}(), param_dist_properties=[var])
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var])
     println("Test with param_dist_properties")
     show(stdout,"text/plain",inf)
 
