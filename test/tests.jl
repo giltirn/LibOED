@@ -61,9 +61,22 @@ function test_inference()
     for s in 1:N_samp
         println(y[:,s])
     end
-    
+
+    #Test with dist_properties
     inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std])
+    println("Test with dist_properties")
     show(stdout,"text/plain",inf)
+
+    #Test with param_dist_properties
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=Array{Function,1}(), param_dist_properties=[var])
+    println("Test with param_dist_properties")
+    show(stdout,"text/plain",inf)
+
+    #Test with both
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var])
+    println("Test with dist_properties and param_dist_properties")
+    show(stdout,"text/plain",inf)
+   
 end
 
 @everywhere @model function test_inference_extra_params_model_dist(y, d, smu::Float64, ssig::Float64)
@@ -135,3 +148,8 @@ end
 test_divide_work()
 test_inference()
 #test_inference_extra_params2()
+
+
+#TODO:
+#Test inference works for models that have no return type
+#Test inference works for models that have tuple return types
