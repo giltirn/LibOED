@@ -4,25 +4,30 @@ mutable struct InferenceResult
 
     param_dist_properties::Dict{String,Dict{String,Array{Any,1}} } #results of applying each of the "param_dist_properties" functions to each chain separately
     avg_param_dist_properties::Dict{String,Dict{String,Any} } #results of averaging each of the "param_dist_properties" over all chains
+
+    chains::Union{Nothing,Vector{Chains}} #optional: output the chains themselves if enabled
 end
 
 strf(f) = String(nameof(f))
 
-InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, param_list::Vector{String}, n::Integer) where {F<:Function,G<:Function} = InferenceResult(
+InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, param_list::Vector{String}, n::Integer, output_chains::Bool) where {F<:Function,G<:Function} = InferenceResult(
     Dict{String,Array{Any,1}}( strf(f) => Array{Any,1}(undef,n) for f in dist_properties ) , #dist_properties
     Dict{String,Any}( strf(f) => nothing for f in dist_properties ) ,                          #avg_dist_properties
-##
+    ##
     Dict{String,Dict{String, Array{Any,1}}  }( strf(f) => Dict{String, Array{Any,1}}( p => Array{Any,1}(undef,n) for p in param_list )
                                                for f in param_dist_properties ),        #param_dist_properties
     Dict{String,Dict{String, Any} }( strf(f) => Dict{String, Any}( p => nothing for p in param_list )
-                                     for f in param_dist_properties )                    #avg_param_dist_properties
+                                     for f in param_dist_properties ),                    #avg_param_dist_properties
+    ##
+    output_chains ? Vector{Chains}(undef,n) : nothing
 )
 
 #Run n chains on the worker, where n is length(y_samples)
-function worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list::Vector{String})
+function worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list::Vector{String}, output_chains::Bool)
     n = length(y_samples)
     out = (  Dict{String, Array{Any,1}}( strf(f) => Array{Any,1}(undef, n) for f in dist_properties ),
-             Dict{String,Dict{String, Array{Any,1}} }( strf(f) => Dict{String,Array{Any,1}}( p => Array{Any,1}(undef, n) for p in param_list) for f in param_dist_properties )
+             Dict{String,Dict{String, Array{Any,1}} }( strf(f) => Dict{String,Array{Any,1}}( p => Array{Any,1}(undef, n) for p in param_list) for f in param_dist_properties ),
+             output_chains ? Vector{Chains}(undef,n) : nothing
              )
     @threads for c in 1:n
         y = y_samples[c]
@@ -45,6 +50,9 @@ function worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_p
                 end
             end           
         end        
+
+        #Optional returning of full chain
+        if(output_chains); out[3][c] = chain; end
         
     end
     return out
@@ -65,16 +73,16 @@ end
 
 #dist: two-argument function that takes the y-sample and the driver; this is expected to wrap a Turing model
 #dist_properties: a list of functions that are applied for each chain to the distribution of model return values (obtained via generated_quantities)
-function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties::Union{Nothing,Array{F,1}}=[var], param_dist_properties::Union{Nothing,Array{G,1}} = nothing )  where {F<:Function,G<:Function}
+function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties::Union{Nothing,Array{F,1}}=[var], param_dist_properties::Union{Nothing,Array{G,1}} = nothing, output_chains::Bool=false )  where {F<:Function,G<:Function}
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
     
-    if( length(dist_properties) == 0 && length(param_dist_properties) == 0); error("Must provide at least one function"); end
+    if( !output_chains && length(dist_properties) == 0 && length(param_dist_properties) == 0); error("Must provide at least one function if not outputing raw chains"); end
 
     #Get list of parameters
     param_list::Vector{String} = [ String(s) for s in DynamicPPL.syms(DynamicPPL.VarInfo(dist(y_sampler(1),driver))) ]
     
-    out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp)
+    out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp, output_chains)
 
     nproc = nprocs()
     work = divide_work(N_samp, nproc)
@@ -102,7 +110,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                 for c in 1:work[i]
                     y_samples[c] = y_sampler(off + c)
                 end
-                wf[i] = @spawnat i worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list)
+                wf[i] = @spawnat i worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
                 off += work[i]
             end
         end
@@ -111,7 +119,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
             for c in 1:work[1]
                 y_samples[c] = y_sampler(c)
             end
-            wf[1] = @spawnat 1 worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list)
+            wf[1] = @spawnat 1 worker_func(dist, driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
         end
 
         #Fetch results after main process has finished
@@ -128,7 +136,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     else
         if(work[1] != N_samp); error("Work division error for single process"); end
         y_samples = [ y_sampler(c) for c in 1:N_samp ]
-        results[1] = worker_func(dist,driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list)
+        results[1] = worker_func(dist,driver, y_samples, chain_length, mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
     end
         
     #Extract and combine data
@@ -165,7 +173,16 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                     end
                 end
             end
-                
+
+            #Extract chains
+            if(output_chains)
+                rf = results[i][3]
+                if length(rf) != work[i]
+                    error("Unexpected amount of work (chains)!")
+                end
+                out.chains[off+1:off+work[i]] = rf[:]
+            end
+            
             off += work[i]
         end
     end
@@ -186,8 +203,8 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
 end
 
 #y_samples: 2-d array with samples in columns
-function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing ) where T<:Number
+function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, output_chains::Bool=false ) where T<:Number
     y_sampler(i) = y_samples[:,i]
     N_samp = size(y_samples,2) #number of columns
-    simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties)
+    simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains)
 end

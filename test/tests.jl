@@ -61,7 +61,7 @@ function test_inference()
     for s in 1:N_samp
         println(y[:,s])
     end
-
+   
     try
         inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing)
     catch e
@@ -82,7 +82,12 @@ function test_inference()
     inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var])
     println("Test with dist_properties and param_dist_properties")
     show(stdout,"text/plain",inf)
-   
+
+    #Test with just chains output
+    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, output_chains=true)
+    println("Test with chains")
+    show(stdout,"text/plain",inf)
+
 end
 
 @everywhere @model function test_inference_extra_params_model_dist(y, d, smu::Float64, ssig::Float64)
