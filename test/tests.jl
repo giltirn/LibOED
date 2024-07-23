@@ -1,14 +1,3 @@
-# using BenchmarkTools
-# using CSV
-# using DataFrames
-# using ForwardDiff
-# using Plots
-# using Plots.PlotMeasures
-# using Optimization
-# using OptimizationOptimJL
-# using Statistics
-# using StatsPlots
-
 using .Threads
 
 using Distributed
@@ -16,6 +5,8 @@ using Distributed
 @everywhere using NamedArrays
 @everywhere using Turing
 @everywhere using LibOED
+
+using Random
 
 function test_divide_work()
     #Divides equally
@@ -45,6 +36,102 @@ end
     return mean(m) # outputs mean of model
 end
 
+function inference_repro_test(model,driver,obs; chain_length=100,dist_properties=nothing, param_dist_properties=nothing, output_chains=false, base_seed=1234)
+    println("Running inference using LibOED")
+    inf=LibOED.simulate_inference(model, driver, obs, chain_length=chain_length,
+                                  dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)
+    println("Running chains separately for reproduction")
+    nsamp = size(obs,2)   
+
+    dmean = Dict{String,Float64}()
+    pmean = Dict{String,Dict{String,Float64}}()
+    
+    for s in 1:nsamp
+        sobs = obs[:,s]
+
+        rng=Xoshiro(base_seed + s)
+        chain = sample(rng, model(sobs,driver), NUTS(0.65), chain_length)
+
+        if(dist_properties != nothing)
+            Q = generated_quantities(model(sobs,driver), Turing.MCMCChains.get_sections(chain, :parameters))
+            for f in dist_properties
+                fname=String(nameof(f))
+                fexpect = f(Q)                
+                fgot=inf.dist_properties[fname][s]
+                println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
+                if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+
+                if(s==1)
+                    dmean[fname] = fexpect
+                else
+                    dmean[fname] += fexpect
+                end
+            end
+
+        end
+        if(param_dist_properties != nothing)
+            S = summarize(chain, param_dist_properties...)
+            for f in param_dist_properties
+                fname=String(nameof(f))
+                if(s==1); pmean[fname] = Dict{String,Float64}(); end
+                
+                for p in chain.name_map.parameters
+                    fexpect = getindex(S,p,nameof(f))
+                    fgot=inf.param_dist_properties[fname][String(p)][s]
+                    println("Sample ",s, " param_dist_properties ", fname, " ", String(p), " got ", fgot, " expect ", fexpect)
+                    if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+
+                    if(s==1)
+                        pmean[fname][String(p)] = fexpect
+                    else
+                        pmean[fname][String(p)] += fexpect
+                    end
+                end
+            end
+        end
+
+        if(output_chains)
+            got = summarize(inf.chains[s], mean, std)
+            expect = summarize(chain, mean, std)
+            
+            for p in chain.name_map.parameters
+                for f in [:mean, :std]                
+                    fexpect = getindex(expect,p,f)
+                    fgot=getindex(got,p,f)
+                    println("Sample ",s, " chain ", f, " ", p, " got ", fgot, " expect ", fexpect)
+                    if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+                end
+            end
+        end
+    end
+
+    if(dist_properties != nothing)
+        println("Checking dist_properties averages")
+        for f in dist_properties
+            fname=String(nameof(f))
+            fexpect = dmean[fname] / nsamp
+            fgot = inf.avg_dist_properties[fname]
+            println(fname," got ",fgot," expect ",fexpect)
+            if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+        end
+    end
+
+    if(param_dist_properties != nothing)
+        println("Checking param_dist_properties averages")
+        for f in param_dist_properties
+            fname=String(nameof(f))
+            for p in keys(pmean[fname])                         
+                fexpect = pmean[fname][p] / nsamp
+                fgot = inf.avg_param_dist_properties[fname][p]
+                println(fname," ",p," got ",fgot," expect ",fexpect)
+                if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+            end
+        end
+    end
+
+    
+end
+
 function test_inference()
     obs_sz = 10
     N_samp = 5
@@ -61,33 +148,22 @@ function test_inference()
     for s in 1:N_samp
         println(y[:,s])
     end
-   
+
+    #Check error if no functions provided and not outputing chains
     try
         inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing)
     catch e
         println("Got expected error: ",e)
     end
-        
-    #Test with dist_properties
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std], param_dist_properties=nothing)
+
     println("Test with dist_properties")
-    show(stdout,"text/plain",inf)
-
-    #Test with param_dist_properties
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var])
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var,mean,std], param_dist_properties=nothing, base_seed=1234)
     println("Test with param_dist_properties")
-    show(stdout,"text/plain",inf)
-
-    #Test with both
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var])
-    println("Test with dist_properties and param_dist_properties")
-    show(stdout,"text/plain",inf)
-
-    #Test with just chains output
-    inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, output_chains=true)
-    println("Test with chains")
-    show(stdout,"text/plain",inf)
-
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var], base_seed=1234)
+    println("Test with dist_properties and param_dist_properties")    
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var], base_seed=1234)
+    println("Test with just chains output")    
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, base_seed=1234, output_chains=true)
 end
 
 @everywhere @model function test_inference_extra_params_model_dist(y, d, smu::Float64, ssig::Float64)

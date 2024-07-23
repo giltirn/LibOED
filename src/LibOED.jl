@@ -6,6 +6,7 @@ using Distributed
 using .Threads
 using Turing
 using DynamicPPL
+using Random
 
 include("inference.jl")
 
