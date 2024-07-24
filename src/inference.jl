@@ -55,15 +55,19 @@ function replace_param_names!(inf::InferenceResult, dict::AbstractDict)
     npcols = size(inf.param_dist_properties,3)
     if(npcols > 0)
         pnames = names(inf.param_dist_properties,2)
+        println("Original parameters: ",pnames)
         for i in 1:length(pnames)
-            if(haskey(dict,pnames[i])); pnames[i] = dict[pnames[i]]; end
+            if(haskey(dict,pnames[i])); pnames[i] = String(dict[pnames[i]]); end
         end
+        println("New parameters: ", pnames)
         setnames!(inf.param_dist_properties, pnames, 2)
         setnames!(inf.avg_param_dist_properties, pnames, 1)
     end
     if(inf.chains != nothing)
         for i in 1:length(inf.chains)
+            if(i==1); println("Original Chain parameters: ", inf.chains[i].name_map.parameters); end
             inf.chains[i] = replacenames(inf.chains[i], dict)
+            if(i==1); println("New Chain parameters: ", inf.chains[i].name_map.parameters); end
         end
     end
 end
