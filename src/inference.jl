@@ -25,12 +25,18 @@ InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, 
 )
 
 #Run n chains on the worker, where n is length(y_samples)
-function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, param_list::Vector{String}, output_chains::Bool)
+function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, output_chains::Bool)
     n = length(y_samples)
-    out = (  Dict{String, Array{Any,1}}( strf(f) => Array{Any,1}(undef, n) for f in dist_properties ),
-             Dict{String,Dict{String, Array{Any,1}} }( strf(f) => Dict{String,Array{Any,1}}( p => Array{Any,1}(undef, n) for p in param_list) for f in param_dist_properties ),
-             output_chains ? Vector{Chains}(undef,n) : nothing
-             )
+
+    thr_dist_prop = Dict{String, Array{Any,1}}( strf(f) => Array{Any,1}(undef, n) for f in dist_properties )
+
+    #problem; there is no easy way to obtain the names of the parameters from the model that works for both array-type parameters and regular parameters
+    #these can only easily be inferred from the Chains objects AFAICT
+    #as such we cannot fully initialize the map forcing us to put the chain index on the outer index
+    thr_pdist_prop = [ Dict{String,Dict{String,Any}}( strf(f) => Dict{String,Any}() for f in param_dist_properties ) for c in 1:n ]
+
+    chains = output_chains ? Vector{Any}(undef, n) : nothing
+    
     @threads for c in 1:n
         y = y_samples[c]
         rng=Xoshiro(base_seed + chain_idx_offset + c)
@@ -40,25 +46,44 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         if(length(dist_properties) > 0)        
             Q = generated_quantities(dist(y,driver), Turing.MCMCChains.get_sections(chain, :parameters))
             for f in dist_properties
-                out[1][strf(f)][c] = f(Q)
+                thr_dist_prop[strf(f)][c] = f(Q)
             end
         end
 
         #Properties of parameter distributions
         if(length(param_dist_properties) > 0)
             S = summarize(chain, param_dist_properties...)
+            cparams = chain.name_map.parameters
+
+            println("Chain param list: ",chain.name_map.parameters)
             for f in param_dist_properties
-                for p in param_list
-                    out[2][strf(f)][p][c] = getindex(S,Symbol(p),Symbol(strf(f)))
+                for p in cparams
+                    thr_pdist_prop[c][strf(f)][String(p)] = getindex(S,p,nameof(f))
                 end
             end           
         end        
 
         #Optional returning of full chain
-        if(output_chains); out[3][c] = chain; end
+        if(output_chains); chains[c] = chain; end
         
     end
-    return out
+
+    #reorder thr_pdist_prop
+    thr_pdist_prop_reord = Dict{String,Dict{String, Array{Any,1}} }()
+    if(length(param_dist_properties) > 0)
+        pkeys = keys(thr_pdist_prop[1][strf(param_dist_properties[1])])
+        thr_pdist_prop_reord = Dict{String,Dict{String, Array{Any,1}} }( strf(f) => Dict{String,Array{Any,1}}( p => Array{Any,1}(undef, n) for p in pkeys) for f in param_dist_properties )
+        for f in param_dist_properties
+            fname = strf(f)
+            for p in pkeys        
+                for c in 1:n
+                    thr_pdist_prop_reord[fname][p][c] = thr_pdist_prop[c][fname][p]
+                end
+            end
+        end
+    end
+    
+    return (thr_dist_prop, thr_pdist_prop_reord, chains)   
 end
 
     
@@ -83,11 +108,6 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
     
     if( !output_chains && length(dist_properties) == 0 && length(param_dist_properties) == 0); error("Must provide at least one function if not outputing raw chains"); end
-
-    #Get list of parameters
-    param_list::Vector{String} = [ String(s) for s in DynamicPPL.syms(DynamicPPL.VarInfo(dist(y_sampler(1),driver))) ]
-    
-    out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
 
     nproc = nprocs()
     work = divide_work(N_samp, nproc)
@@ -116,7 +136,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                     y_samples[c] = y_sampler(off + c)
                 end
                 wf[i] = @spawnat i worker_func(dist, driver, y_samples, off, chain_length, base_seed,
-                                               mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
+                                               mcmc_sampler, dist_properties, param_dist_properties, output_chains)
                 off += work[i]
             end
         end
@@ -126,7 +146,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                 y_samples[c] = y_sampler(c)
             end
             wf[1] = @spawnat 1 worker_func(dist, driver, y_samples, 0, chain_length, base_seed,
-                                           mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
+                                           mcmc_sampler, dist_properties, param_dist_properties, output_chains)
         end
 
         #Fetch results after main process has finished
@@ -144,10 +164,21 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
         if(work[1] != N_samp); error("Work division error for single process"); end
         y_samples = [ y_sampler(c) for c in 1:N_samp ]
         results[1] = worker_func(dist,driver, y_samples, 0, chain_length, base_seed,
-                                 mcmc_sampler, dist_properties, param_dist_properties, param_list, output_chains)
+                                 mcmc_sampler, dist_properties, param_dist_properties, output_chains)
     end
-        
-    #Extract and combine data
+
+    #Get the list of params so we can initialize output (only needed if using param_dist_properties)
+    param_list = Vector{String}()
+    if(length(param_dist_properties) > 0)
+        if(work[1] == 0); error("Expect first proc to have work"); end
+        param_list = [k for k in keys(results[1][2][strf(param_dist_properties[1])]) ]::Vector{String}
+        println("Model parameters: ", param_list)
+    end
+
+    #Initialize output
+    out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
+    
+    #Extract and combine data   
     dfkeys = [strf(f) for f in dist_properties]
     pfkeys = [strf(f) for f in param_dist_properties]
     off = 0

@@ -36,10 +36,21 @@ end
     return mean(m) # outputs mean of model
 end
 
+@everywhere @model function test_inference_model_pvec_dist(y, d)
+    σ ~ LogNormal(log(1), log(2)/2) #data noise
+    p ~ arraydist([Normal(0,1), Normal(2,3)]) #array of parameters
+    m = p[1] * d .+ p[2] * d.^2   
+    y ~ MvNormal(m, σ*I)
+    return mean(m) # outputs mean of model
+end
+
+
 function inference_repro_test(model,driver,obs; chain_length=100,dist_properties=nothing, param_dist_properties=nothing, output_chains=false, base_seed=1234)
     println("Running inference using LibOED")
     inf=LibOED.simulate_inference(model, driver, obs, chain_length=chain_length,
                                   dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)
+    show(stdout,"text/plain",inf); println("")
+    
     println("Running chains separately for reproduction")
     nsamp = size(obs,2)   
 
@@ -51,12 +62,12 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
 
         rng=Xoshiro(base_seed + s)
         chain = sample(rng, model(sobs,driver), NUTS(0.65), chain_length)
-
+        
         if(dist_properties != nothing)
             Q = generated_quantities(model(sobs,driver), Turing.MCMCChains.get_sections(chain, :parameters))
             for f in dist_properties
                 fname=String(nameof(f))
-                fexpect = f(Q)                
+                fexpect = f(Q)               
                 fgot=inf.dist_properties[fname][s]
                 println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
                 if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
@@ -148,7 +159,7 @@ function test_inference()
     for s in 1:N_samp
         println(y[:,s])
     end
-
+    
     #Check error if no functions provided and not outputing chains
     try
         inf=LibOED.simulate_inference(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing)
@@ -164,6 +175,8 @@ function test_inference()
     inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var], base_seed=1234)
     println("Test with just chains output")    
     inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, base_seed=1234, output_chains=true)
+    println("Test with model with arraydist param")
+    inference_repro_test(test_inference_model_pvec_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var], base_seed=1234)
 end
 
 function test_base_seed_increment()
@@ -270,8 +283,8 @@ end
 
 
 #test_divide_work()
-#test_inference()
-test_base_seed_increment()
+test_inference()
+#test_base_seed_increment()
 #test_inference_extra_params2()
 
 
