@@ -73,11 +73,12 @@ function divide_work(n, nproc)
     return nw
 end
 
+const global_base_seed = Ref{Int64}(1234)
 
 #dist: two-argument function that takes the y-sample and the driver; this is expected to wrap a Turing model
 #dist_properties: a list of functions that are applied for each chain to the distribution of model return values (obtained via generated_quantities)
 #base_seed: a RNG is seeded for each chain as base_seed + chain_idx
-function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties::Union{Nothing,Array{F,1}}=[var], param_dist_properties::Union{Nothing,Array{G,1}} = nothing, output_chains::Bool=false, base_seed::Int64=1234 )  where {F<:Function,G<:Function}
+function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties::Union{Nothing,Array{F,1}}=[var], param_dist_properties::Union{Nothing,Array{G,1}} = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )  where {F<:Function,G<:Function}
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
     
@@ -205,12 +206,15 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
             out.avg_param_dist_properties[fkey][p] = mean(out.param_dist_properties[fkey][p])
         end
     end
+
+    #Increment global_base_seed to ensure next call uses different seed for all chains
+    global_base_seed[] += N_samp
     
     return out
 end
 
 #y_samples: 2-d array with samples in columns
-function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, output_chains::Bool=false, base_seed::Int64=1234 ) where T<:Number
+function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] ) where T<:Number
     y_sampler(i) = y_samples[:,i]
     N_samp = size(y_samples,2) #number of columns
     simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)

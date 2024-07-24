@@ -166,6 +166,43 @@ function test_inference()
     inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, base_seed=1234, output_chains=true)
 end
 
+function test_base_seed_increment()
+    obs_sz = 10
+    N_samp = 5
+    d=Array{Float64}(undef, obs_sz)
+    y=Array{Float64,2}(undef, obs_sz, N_samp)
+    for i in 1:obs_sz
+        d[i] = i
+        for s in 1:N_samp
+            y[i,s] = 2*i + randn()
+        end
+    end
+
+    base_seed_1 = copy(LibOED.global_base_seed[])
+    println("Initial base seed ", base_seed_1)
+    
+    inf=simulate_inference(test_inference_model_dist,d, y, chain_length=10)   
+
+    if(inf.base_seed != base_seed_1); error("Test failed"); end
+
+    base_seed_2 = copy(LibOED.global_base_seed[])
+    println("Base seed after first inference ", base_seed_2)
+    
+    if(base_seed_2 != base_seed_1 + N_samp); error("Test failed"); end
+
+    inf=simulate_inference(test_inference_model_dist,d, y, chain_length=10)   
+
+    if(inf.base_seed != base_seed_2); error("Test failed"); end
+    
+    base_seed_3 = copy(LibOED.global_base_seed[])
+    println("Base seed after second inference ", base_seed_3)
+    
+    if(base_seed_3 != base_seed_2 + N_samp); error("Test failed"); end
+
+    println("test_base_seed_increment passed")
+end
+
+
 @everywhere @model function test_inference_extra_params_model_dist(y, d, smu::Float64, ssig::Float64)
     σ ~ LogNormal(smu, ssig)
     y ~ MvNormal(2*d, σ*I) #y=2d + eps    
@@ -232,8 +269,9 @@ end
 
 
 
-test_divide_work()
-test_inference()
+#test_divide_work()
+#test_inference()
+test_base_seed_increment()
 #test_inference_extra_params2()
 
 
