@@ -50,6 +50,8 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     inf=LibOED.simulate_inference(model, driver, obs, chain_length=chain_length,
                                   dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)
     show(stdout,"text/plain",inf); println("")
+    show(stdout,"text/plain",inf.dist_properties); println("")
+    show(stdout,"text/plain",inf.param_dist_properties); println("")
     
     println("Running chains separately for reproduction")
     nsamp = size(obs,2)   
@@ -68,7 +70,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
             for f in dist_properties
                 fname=String(nameof(f))
                 fexpect = f(Q)               
-                fgot=inf.dist_properties[fname][s]
+                fgot=inf.dist_properties[s,fname]
                 println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
                 if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
 
@@ -88,7 +90,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
                 
                 for p in chain.name_map.parameters
                     fexpect = getindex(S,p,nameof(f))
-                    fgot=inf.param_dist_properties[fname][String(p)][s]
+                    fgot=inf.param_dist_properties[s,String(p),fname]
                     println("Sample ",s, " param_dist_properties ", fname, " ", String(p), " got ", fgot, " expect ", fexpect)
                     if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
 
@@ -133,7 +135,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
             fname=String(nameof(f))
             for p in keys(pmean[fname])                         
                 fexpect = pmean[fname][p] / nsamp
-                fgot = inf.avg_param_dist_properties[fname][p]
+                fgot = inf.avg_param_dist_properties[p,fname]
                 println(fname," ",p," got ",fgot," expect ",fexpect)
                 if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
             end

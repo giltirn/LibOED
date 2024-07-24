@@ -7,6 +7,7 @@ using .Threads
 using Turing
 using DynamicPPL
 using Random
+using NamedArrays
 
 include("inference.jl")
 

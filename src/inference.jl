@@ -1,9 +1,9 @@
 mutable struct InferenceResult
-    dist_properties::Dict{String,Array{Any,1}} #results of applying each of the "dist_properties" functions to each chain separately
-    avg_dist_properties::Dict{String,Any} #results of averaging each of the "dist_properties" over all chains
+    dist_properties::NamedArray{Any,2} #[chain idx][func name] => statistic : results of applying each of the "dist_properties" functions to each chain separately
+    avg_dist_properties::NamedArray{Any,1} #[func_name] => avg statistic  : results of averaging each of the "dist_properties" over all chains
 
-    param_dist_properties::Dict{String,Dict{String,Array{Any,1}} } #results of applying each of the "param_dist_properties" functions to each chain separately
-    avg_param_dist_properties::Dict{String,Dict{String,Any} } #results of averaging each of the "param_dist_properties" over all chains
+    param_dist_properties::NamedArray{Any,3} #[chain idx][param name][func name] => statistic :  results of applying each of the "param_dist_properties" functions to each chain separately
+    avg_param_dist_properties::NamedArray{Any,2} #[param name][func_name] => avg statistic  :  results of averaging each of the "param_dist_properties" over all chains
 
     chains::Union{Nothing,Vector{Chains}} #optional: output the chains themselves if enabled
     base_seed::Int64 #the base seed used by the internal RNGs. The seed for a given chain is base_seed + chain_idx
@@ -11,19 +11,47 @@ end
 
 strf(f) = String(nameof(f))
 
-InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, param_list::Vector{String}, n::Integer, output_chains::Bool, base_seed::Int64) where {F<:Function,G<:Function} = InferenceResult(
-    Dict{String,Array{Any,1}}( strf(f) => Array{Any,1}(undef,n) for f in dist_properties ) , #dist_properties
-    Dict{String,Any}( strf(f) => nothing for f in dist_properties ) ,                          #avg_dist_properties
-    ##
-    Dict{String,Dict{String, Array{Any,1}}  }( strf(f) => Dict{String, Array{Any,1}}( p => Array{Any,1}(undef,n) for p in param_list )
-                                               for f in param_dist_properties ),        #param_dist_properties
-    Dict{String,Dict{String, Any} }( strf(f) => Dict{String, Any}( p => nothing for p in param_list )
-                                     for f in param_dist_properties ),                    #avg_param_dist_properties
-    ##
-    output_chains ? Vector{Chains}(undef,n) : nothing,
-    base_seed    
-)
+function InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, param_list::Vector{String}, n::Integer, output_chains::Bool, base_seed::Int64) where {F<:Function,G<:Function}
+    fcolnames = [strf(f) for f in dist_properties]
+    pcolnames = [strf(f) for f in param_dist_properties]
 
+    o_dist_properties = NamedArray(Any,0,0)
+    o_avg_dist_properties = NamedArray(Any,0)
+    o_param_dist_properties = NamedArray(Any,0,0,0)
+    o_avg_param_dist_properties = NamedArray(Any,0,0)
+    
+    if(length(fcolnames)>0)
+        o_dist_properties = NamedArray(Any, n, length(fcolnames))
+        setdimnames!(o_dist_properties, "Sample", 1)
+        setdimnames!(o_dist_properties, "Statistic", 2)
+        setnames!(o_dist_properties, fcolnames, 2)
+        
+        o_avg_dist_properties = NamedArray(Any, length(fcolnames))
+        setdimnames!(o_avg_dist_properties, "Statistic", 1)
+        setnames!(o_avg_dist_properties, fcolnames, 1)
+    end
+
+    if(length(pcolnames)>0)
+        o_param_dist_properties = NamedArray(Any, n, length(param_list), length(pcolnames))
+        setdimnames!(o_param_dist_properties, "Sample", 1)
+        setdimnames!(o_param_dist_properties, "Param", 2)
+        setnames!(o_param_dist_properties, param_list, 2)
+        setdimnames!(o_param_dist_properties, "Statistic", 3)
+        setnames!(o_param_dist_properties, pcolnames, 3)
+        
+        o_avg_param_dist_properties = NamedArray(Any, length(param_list), length(pcolnames))
+        setdimnames!(o_avg_param_dist_properties, "Param", 1)
+        setnames!(o_avg_param_dist_properties, param_list, 1)
+        setdimnames!(o_avg_param_dist_properties, "Statistic", 2)
+        setnames!(o_avg_param_dist_properties, pcolnames, 2)
+    end
+        
+    return InferenceResult(o_dist_properties, o_avg_dist_properties, o_param_dist_properties, o_avg_param_dist_properties, 
+                           output_chains ? Vector{Chains}(undef,n) : nothing,
+                           base_seed)
+end
+
+    
 #Run n chains on the worker, where n is length(y_samples)
 function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, output_chains::Bool)
     n = length(y_samples)
@@ -194,7 +222,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                         error("Unexpected amount of work (dist_properties)!")
                     end
                 
-                    out.dist_properties[fkey][off+1:off+work[i]] = rf[:]
+                    out.dist_properties[off+1:off+work[i], fkey] = rf[:]
                 end
             end
 
@@ -208,7 +236,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                             error("Unexpected amount of work (param_dist_properties)!")
                         end
                 
-                        out.param_dist_properties[fkey][p][off+1:off+work[i]] = rf[:]
+                        out.param_dist_properties[off+1:off+work[i],p,fkey] = rf[:]
                     end
                 end
             end
@@ -228,13 +256,13 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
 
     #Averages for dist_properties
     for fkey in dfkeys
-        out.avg_dist_properties[fkey] = mean(out.dist_properties[fkey])
+        out.avg_dist_properties[fkey] = mean(out.dist_properties[:,fkey])
     end
 
     #Averages for param_dist_properties
     for fkey in pfkeys
         for p in param_list
-            out.avg_param_dist_properties[fkey][p] = mean(out.param_dist_properties[fkey][p])
+            out.avg_param_dist_properties[p,fkey] = mean(out.param_dist_properties[:,p,fkey])
         end
     end
 
