@@ -217,6 +217,41 @@ function test_base_seed_increment()
     println("test_base_seed_increment passed")
 end
 
+function test_replace_param_names()
+    obs_sz = 10
+    N_samp = 1
+    d=Array{Float64}(undef, obs_sz)
+    y=Array{Float64,2}(undef, obs_sz, N_samp)
+    for i in 1:obs_sz
+        d[i] = i
+        for s in 1:N_samp
+            y[i,s] = 2*i + randn()
+        end
+    end
+
+    inf=LibOED.simulate_inference(test_inference_model_pvec_dist,d, y, chain_length=10, dist_properties=[mean], param_dist_properties=[var], base_seed=1234, output_chains=true)
+
+    p1_1 = names(inf.param_dist_properties,2)
+    p1_2 = names(inf.avg_param_dist_properties,1)
+    p1_3 = inf.chains[1].name_map.parameters
+    println(p1_1, p1_2, p1_3)
+    for nm in ["σ","p[1]","p[2]"]
+        if( nm ∉  p1_1 || nm ∉  p1_2 || Symbol(nm) ∉ p1_3 ); error("Unexpected initial params, could not find ", nm); end
+    end
+   
+    replace_param_names!(inf, Dict("p[1]"=>"ρ","p[2]"=>"κ"))
+    
+    p2_1 = names(inf.param_dist_properties,2)
+    p2_2 = names(inf.avg_param_dist_properties,1)
+    p2_3 = inf.chains[1].name_map.parameters
+    println(p2_1, p2_2, p2_3)
+    for nm in ["σ","ρ","κ"]
+        if( nm ∉  p2_1 || nm ∉  p2_2 || Symbol(nm) ∉ p2_3 ); error("Unexpected result params, could not find ", nm); end
+    end
+    println("test_replace_param_names passed")    
+end
+
+
 
 @everywhere @model function test_inference_extra_params_model_dist(y, d, smu::Float64, ssig::Float64)
     σ ~ LogNormal(smu, ssig)
@@ -285,8 +320,10 @@ end
 
 
 #test_divide_work()
-test_inference()
+#test_inference()
 #test_base_seed_increment()
+test_replace_param_names()
+
 #test_inference_extra_params2()
 
 

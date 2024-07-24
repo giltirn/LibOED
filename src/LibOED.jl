@@ -1,6 +1,6 @@
 module LibOED
 
-export simulate_inference
+export simulate_inference, replace_param_names!
 
 using Distributed
 using .Threads

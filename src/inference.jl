@@ -51,7 +51,24 @@ function InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Arr
                            base_seed)
 end
 
-    
+function replace_param_names!(inf::InferenceResult, dict::AbstractDict)
+    npcols = size(inf.param_dist_properties,3)
+    if(npcols > 0)
+        pnames = names(inf.param_dist_properties,2)
+        for i in 1:length(pnames)
+            if(haskey(dict,pnames[i])); pnames[i] = dict[pnames[i]]; end
+        end
+        setnames!(inf.param_dist_properties, pnames, 2)
+        setnames!(inf.avg_param_dist_properties, pnames, 1)
+    end
+    if(inf.chains != nothing)
+        for i in 1:length(inf.chains)
+            inf.chains[i] = replacenames(inf.chains[i], dict)
+        end
+    end
+end
+
+
 #Run n chains on the worker, where n is length(y_samples)
 function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, output_chains::Bool)
     n = length(y_samples)
