@@ -77,12 +77,19 @@ end
 function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, output_chains::Bool)
     n = length(y_samples)
 
-    thr_dist_prop = Dict{String, Array{Any,1}}( strf(f) => Array{Any,1}(undef, n) for f in dist_properties )
+    thr_dist_prop = nothing
+    if(length(dist_properties)>0)
+        thr_dist_prop = NamedArray(Any, n, length(dist_properties)) #[chain idx, func idx]
+        setnames!(thr_dist_prop, [strf(f) for f in dist_properties], 2)
+    end
 
-    #problem; there is no easy way to obtain the names of the parameters from the model that works for both array-type parameters and regular parameters
-    #these can only easily be inferred from the Chains objects AFAICT
-    #as such we cannot fully initialize the map forcing us to put the chain index on the outer index
-    thr_pdist_prop = [ Dict{String,Dict{String,Any}}( strf(f) => Dict{String,Any}() for f in param_dist_properties ) for c in 1:n ]
+    thr_pdist_prop = nothing
+    if(length(param_dist_properties)>0)
+        #problem; there is no easy way to obtain the names of the parameters from the model that works for both array-type parameters and regular parameters
+        #these can only easily be inferred from the Chains objects AFAICT
+        #as such we cannot fully initialize a multidimensional array forcing us to put the chain index on the outer index
+        thr_pdist_prop = Vector{ NamedArray{Any,2} }(undef, n) #[chain idx][param idx, func idx]
+    end
 
     chains = output_chains ? Vector{Any}(undef, n) : nothing
     
@@ -95,7 +102,7 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         if(length(dist_properties) > 0)        
             Q = generated_quantities(dist(y,driver), Turing.MCMCChains.get_sections(chain, :parameters))
             for f in dist_properties
-                thr_dist_prop[strf(f)][c] = f(Q)
+                thr_dist_prop[c,strf(f)] = f(Q)
             end
         end
 
@@ -103,11 +110,13 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         if(length(param_dist_properties) > 0)
             S = summarize(chain, param_dist_properties...)
             cparams = chain.name_map.parameters
-
-            println("Chain param list: ",chain.name_map.parameters)
+            thr_pdist_prop[c] = NamedArray(Any, length(chain.name_map.parameters), length(param_dist_properties) )
+            setnames!(thr_pdist_prop[c], [String(f) for f in chain.name_map.parameters], 1)
+            setnames!(thr_pdist_prop[c], [strf(f) for f in param_dist_properties], 2)
+            
             for f in param_dist_properties
                 for p in cparams
-                    thr_pdist_prop[c][strf(f)][String(p)] = getindex(S,p,nameof(f))
+                    thr_pdist_prop[c][String(p),strf(f)] = getindex(S,p,nameof(f))
                 end
             end           
         end        
@@ -117,19 +126,22 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         
     end
 
+   
     #reorder thr_pdist_prop
-    thr_pdist_prop_reord = Dict{String,Dict{String, Array{Any,1}} }()
+    thr_pdist_prop_reord = nothing
     if(length(param_dist_properties) > 0)
-        pkeys = keys(thr_pdist_prop[1][strf(param_dist_properties[1])])
-        thr_pdist_prop_reord = Dict{String,Dict{String, Array{Any,1}} }( strf(f) => Dict{String,Array{Any,1}}( p => Array{Any,1}(undef, n) for p in pkeys) for f in param_dist_properties )
-        for f in param_dist_properties
-            fname = strf(f)
-            for p in pkeys        
-                for c in 1:n
-                    thr_pdist_prop_reord[fname][p][c] = thr_pdist_prop[c][fname][p]
-                end
-            end
+        #check all chains agree on params list
+        pkeys=names(thr_pdist_prop[1],1)
+        for c in 2:n
+            if names(thr_pdist_prop[c],1) != pkeys; error("Name mismatch, got ", names(thr_pdist_prop[c],1), " expect ", pkeys); end
         end
+        thr_pdist_prop_reord = NamedArray(Any, n, length(pkeys), length(param_dist_properties))
+        setnames!(thr_pdist_prop_reord, pkeys, 2)
+        setnames!(thr_pdist_prop_reord, [strf(f) for f in param_dist_properties], 3)
+
+        for c in 1:n
+            thr_pdist_prop_reord[c, :, :] = thr_pdist_prop[c][:,:]
+        end        
     end
     
     return (thr_dist_prop, thr_pdist_prop_reord, chains)   
@@ -220,7 +232,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     param_list = Vector{String}()
     if(length(param_dist_properties) > 0)
         if(work[1] == 0); error("Expect first proc to have work"); end
-        param_list = [k for k in keys(results[1][2][strf(param_dist_properties[1])]) ]::Vector{String}
+        param_list = names(results[1][2],2)
         println("Model parameters: ", param_list)
     end
 
@@ -233,33 +245,24 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     off = 0
     for i in 1:nproc
         if work[i] > 0
-
             #Extract dist_properties data
             if(length(dist_properties) > 0)
-                for fkey in dfkeys              
-                    rf = results[i][1][fkey]
-                
-                    if length(rf) != work[i]
-                        error("Unexpected amount of work (dist_properties)!")
-                    end
-                
-                    out.dist_properties[off+1:off+work[i], fkey] = rf[:]
-                end
+                rf = results[i][1]
+                if(size(rf,1) != work[i]); error("Unexpected amount of work (dist_properties)!"); end
+                if(size(rf,2) != length(dist_properties)); error("Unexpected amount of funcs (dist_properties)!"); end
+                if(names(out.dist_properties,2) != names(rf,2)); error("Function names mismatch (dist_properties)!"); end
+                out.dist_properties[off+1:off+work[i], :] = rf[:,:]
             end
 
             #Extract param_dist_properties data
             if(length(param_dist_properties) > 0)
-                for fkey in pfkeys
-                    for p in param_list                    
-                        rf = results[i][2][fkey][p]
-                
-                        if length(rf) != work[i]
-                            error("Unexpected amount of work (param_dist_properties)!")
-                        end
-                
-                        out.param_dist_properties[off+1:off+work[i],p,fkey] = rf[:]
-                    end
-                end
+                rf = results[i][2]
+                if(size(rf,1) != work[i]); error("Unexpected amount of work (param_dist_properties)!"); end
+                if(size(rf,2) != length(param_list)); error("Unexpected amount of params (param_dist_properties)!"); end
+                if(size(rf,3) != length(param_dist_properties)); error("Unexpected amount of funcs (param_dist_properties)!"); end
+                if(names(out.param_dist_properties,2) != names(rf,2)); error("Parameter names mismatch (param_dist_properties)!"); end
+                if(names(out.param_dist_properties,3) != names(rf,3)); error("Function names mismatch (param_dist_properties)!"); end
+                out.param_dist_properties[off+1:off+work[i], :, :] = rf[:,:,:]
             end
 
             #Extract chains

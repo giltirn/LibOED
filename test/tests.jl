@@ -319,9 +319,9 @@ end
 
 
 
-#test_divide_work()
-#test_inference()
-#test_base_seed_increment()
+test_divide_work()
+test_inference()
+test_base_seed_increment()
 test_replace_param_names()
 
 #test_inference_extra_params2()
