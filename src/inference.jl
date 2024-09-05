@@ -5,6 +5,8 @@ struct InferenceResult
     param_dist_properties::NamedArray{Any,3} #[chain idx][param name][func name] => statistic :  results of applying each of the "param_dist_properties" functions to each chain separately
     avg_param_dist_properties::NamedArray{Any,2} #[param name][func_name] => avg statistic  :  results of averaging each of the "param_dist_properties" over all chains
 
+    posterior_derived_quants::NamedArray{Any, 2} #[chain idx][func name] => derived quantity : results of applying an arbitrary operation to the chain itself, eg sampling from it and computing a derived quantity
+    
     chains::Union{Nothing,Vector{Chains}} #optional: output the chains themselves if enabled
     base_seed::Int64 #the base seed used by the internal RNGs. The seed for a given chain is base_seed + chain_idx
 end
@@ -24,26 +26,34 @@ function getFunc(f::Function)
 end
 
 
-function InferenceResult_(dist_properties_funcs, param_dist_properties_funcs, param_list::Vector{Symbol}, n::Integer, output_chains::Bool, base_seed::Int64)
+function InferenceResult_(dist_properties_funcs, param_dist_properties_funcs, posterior_funcs, param_list::Vector{Symbol}, n::Integer, output_chains::Bool, base_seed::Int64)
     fcolnames = [getFuncName(f) for f in dist_properties_funcs]
     pcolnames = [getFuncName(f) for f in param_dist_properties_funcs]
+    postcolnames = [getFuncName(f) for f in posterior_funcs]
 
+    chainidxlabels = [string(i) for i in 1:n]
+    
     o_dist_properties = NamedArray(Any,0,0)
     o_avg_dist_properties = NamedArray(Any,0)
     o_param_dist_properties = NamedArray(Any,0,0,0)
     o_avg_param_dist_properties = NamedArray(Any,0,0)
+    o_posterior_derived_quants = NamedArray(Any,0,0)
     
     if(length(fcolnames)>0)
-        o_dist_properties = NamedArray( Array{Any,2}(undef, n, length(fcolnames)); names=([string(i) for i in 1:n], fcolnames), dimnames=(:Sample,:Statistic) )
+        o_dist_properties = NamedArray( Array{Any,2}(undef, n, length(fcolnames)); names=(chainidxlabels, fcolnames), dimnames=(:Sample,:Statistic) )
         o_avg_dist_properties = NamedArray( Vector{Any}(undef, length(fcolnames)); names=(fcolnames,), dimnames=(:Statistic,) )
     end
 
     if(length(pcolnames)>0)
-        o_param_dist_properties = NamedArray( Array{Any,3}(undef, n, length(param_list), length(pcolnames)); names=([string(i) for i in 1:n], param_list, pcolnames), dimnames=(:Sample,:Param,:Statistic) )
+        o_param_dist_properties = NamedArray( Array{Any,3}(undef, n, length(param_list), length(pcolnames)); names=(chainidxlabels, param_list, pcolnames), dimnames=(:Sample,:Param,:Statistic) )
         o_avg_param_dist_properties = NamedArray( Array{Any,2}(undef, length(param_list), length(pcolnames)); names=(param_list, pcolnames), dimnames=(:Param,:Statistic) )
     end
+
+    if(length(postcolnames)>0)
+        o_posterior_derived_quants = NamedArray( Array{Any,2}(undef, n, length(postcolnames)); names=(chainidxlabels, postcolnames), dimnames=(:Sample,:Quantity) ) 
+    end
         
-    return InferenceResult(o_dist_properties, o_avg_dist_properties, o_param_dist_properties, o_avg_param_dist_properties, 
+    return InferenceResult(o_dist_properties, o_avg_dist_properties, o_param_dist_properties, o_avg_param_dist_properties, o_posterior_derived_quants,
                            output_chains ? Vector{Chains}(undef,n) : nothing,
                            base_seed)
 end
@@ -71,24 +81,21 @@ end
 
 
 #Run n chains on the worker, where n is length(y_samples)
-function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, output_chains::Bool)
+function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains::Bool)
     n = length(y_samples)
+    rnames = [string(i) for i in 1:n]    
+    
+    thr_dist_prop = length(dist_properties)>0 ?
+        NamedArray(Array{Any,2}(undef, n, length(dist_properties)); names=(rnames,[getFuncName(f) for f in dist_properties]) ) : nothing   #[chain idx, func name]
 
-    thr_dist_prop = nothing
-    if(length(dist_properties)>0)
-        rnames = [string(i) for i in 1:n]
-        cnames = [getFuncName(f) for f in dist_properties]
-        thr_dist_prop = NamedArray(Array{Any,2}(undef, n, length(dist_properties)); names=(rnames,cnames) ) #[chain idx, func idx]
-    end
+    #problem; there is no easy way to obtain the names of the parameters from the model that works for both array-type parameters and regular parameters
+    #these can only easily be inferred from the Chains objects AFAICT
+    #as such we cannot fully initialize a multidimensional array forcing us to put the chain index on the outer index
+    thr_pdist_prop = length(param_dist_properties)>0 ? Vector{ NamedArray{Any,2} }(undef, n) : nothing  #[chain idx][param idx, func name]
 
-    thr_pdist_prop = nothing
-    if(length(param_dist_properties)>0)
-        #problem; there is no easy way to obtain the names of the parameters from the model that works for both array-type parameters and regular parameters
-        #these can only easily be inferred from the Chains objects AFAICT
-        #as such we cannot fully initialize a multidimensional array forcing us to put the chain index on the outer index
-        thr_pdist_prop = Vector{ NamedArray{Any,2} }(undef, n) #[chain idx][param idx, func idx]
-    end
-
+    thr_post_op = length(posterior_operations)>0 ?
+        NamedArray(Array{Any,2}(undef, n, length(posterior_operations)); names=(rnames,[getFuncName(f) for f in posterior_operations])) : nothing   #[chain idx, func name]
+    
     chains = output_chains ? Vector{Any}(undef, n) : nothing
     
     @threads for c in 1:n
@@ -119,6 +126,13 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
                     thr_pdist_prop[c][p,getFuncName(f)] = getindex(S,p,getFuncName(f))
                 end
             end           
+        end
+
+        #Operations performed on the posterior chain
+        if(length(posterior_operations) > 0)
+            for f in posterior_operations
+                thr_post_op[c,getFuncName(f)] = getFunc(f)(chain, rng)
+            end
         end        
 
         #Optional returning of full chain
@@ -143,7 +157,7 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         end        
     end
     
-    return (thr_dist_prop, thr_pdist_prop_reord, chains)   
+    return (thr_dist_prop, thr_pdist_prop_reord, thr_post_op, chains)   
 end
 
     
@@ -162,12 +176,19 @@ const global_base_seed = Ref{Int64}(1234)
 
 #dist: two-argument function that takes the y-sample and the driver; this is expected to wrap a Turing model
 #dist_properties: a list of functions that are applied for each chain to the distribution of model return values (obtained via generated_quantities)
+#param_dist_properties: a list of functions that are applied over the posterior samples of each parameter
+#posterior_operations : a list of functions that are applied to the output posterior chains. Function signature should be Function(::Chains, ::AbstractRNG)
 #base_seed: a RNG is seeded for each chain as base_seed + chain_idx
-function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )
+function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65),
+    dist_properties=[var], param_dist_properties = nothing, posterior_operations = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )
+    
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
+    if(posterior_operations === nothing); posterior_operations = Array{Function,1}(); end
     
-    if( !output_chains && length(dist_properties) == 0 && length(param_dist_properties) == 0); error("Must provide at least one function if not outputing raw chains"); end
+    if( !output_chains && length(dist_properties) == 0 && length(param_dist_properties) == 0 && length(posterior_operations) == 0);
+        error("Must provide at least one function if not outputing raw chains");
+    end
 
     nproc = nprocs()
     work = divide_work(N_samp, nproc)
@@ -196,7 +217,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                     y_samples[c] = y_sampler(off + c)
                 end
                 wf[i] = @spawnat i worker_func(dist, driver, y_samples, off, chain_length, base_seed,
-                                               mcmc_sampler, dist_properties, param_dist_properties, output_chains)
+                                               mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
                 off += work[i]
             end
         end
@@ -206,7 +227,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                 y_samples[c] = y_sampler(c)
             end
             wf[1] = @spawnat 1 worker_func(dist, driver, y_samples, 0, chain_length, base_seed,
-                                           mcmc_sampler, dist_properties, param_dist_properties, output_chains)
+                                           mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
         end
 
         #Fetch results after main process has finished
@@ -224,7 +245,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
         if(work[1] != N_samp); error("Work division error for single process"); end
         y_samples = [ y_sampler(c) for c in 1:N_samp ]
         results[1] = worker_func(dist,driver, y_samples, 0, chain_length, base_seed,
-                                 mcmc_sampler, dist_properties, param_dist_properties, output_chains)
+                                 mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
     end
 
     #Get the list of params so we can initialize output (only needed if using param_dist_properties)
@@ -236,7 +257,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     #Initialize output
-    out = InferenceResult_(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
+    out = InferenceResult_(dist_properties, param_dist_properties, posterior_operations, param_list, N_samp, output_chains, base_seed)
     
     #Extract and combine data   
     dfkeys = [getFuncName(f) for f in dist_properties]
@@ -264,9 +285,18 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
                 out.param_dist_properties[off+1:off+work[i], :, :] = rf[:,:,:]
             end
 
+            #Extract posterior_derived_quants
+            if(length(posterior_operations) > 0)
+                rf = results[i][3]
+                if(size(rf,1) != work[i]); error("Unexpected amount of work (posterior_derived_quants)!"); end
+                if(size(rf,2) != length(posterior_operations)); error("Unexpected amount of funcs (posterior_derived_quants)!"); end
+                if(names(out.posterior_derived_quants,2) != names(rf,2)); error("Function names mismatch (posterior_derived_quants)!"); end
+                out.posterior_derived_quants[off+1:off+work[i], :, :] = rf[:,:]
+            end
+            
             #Extract chains
             if(output_chains)
-                rf = results[i][3]
+                rf = results[i][4]
                 if length(rf) != work[i]
                     error("Unexpected amount of work (chains)!")
                 end
@@ -303,8 +333,8 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
 end
 
 #y_samples: 2-d array with samples in columns
-function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] ) where T<:Number
+function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, posterior_operations=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] ) where T<:Number
     y_sampler(i) = y_samples[:,i]
     N_samp = size(y_samples,2) #number of columns
-    simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)
+    simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations, output_chains=output_chains, base_seed=base_seed)
 end

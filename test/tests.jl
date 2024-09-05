@@ -65,13 +65,15 @@ end
 
 
 
-function inference_repro_test(model,driver,obs; chain_length=100,dist_properties=nothing, param_dist_properties=nothing, output_chains=false, base_seed=1234)
+function inference_repro_test(model,driver,obs; chain_length=100,dist_properties=nothing, param_dist_properties=nothing, posterior_operations=nothing, output_chains=false, base_seed=1234)
     println("Running inference using LibOED")
     inf=LibOED.simulate_inference(model, driver, obs, chain_length=chain_length,
-                                  dist_properties=dist_properties, param_dist_properties=param_dist_properties, output_chains=output_chains, base_seed=base_seed)
+                                  dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations,
+                                  output_chains=output_chains, base_seed=base_seed)
     show(stdout,"text/plain",inf); println("")
     show(stdout,"text/plain",inf.dist_properties); println("")
     show(stdout,"text/plain",inf.param_dist_properties); println("")
+    show(stdout,"text/plain",inf.posterior_derived_quants); println("")
     
     println("Running chains separately for reproduction")
     nsamp = size(obs,2)   
@@ -137,7 +139,17 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
                 end
             end
         end
-
+        if(posterior_operations != nothing)
+            for f in posterior_operations
+                func = isa(f,Function) ? f : f[2]
+                fname = isa(f,Function) ? nameof(f) : f[1]
+                fexpect = func(chain, rng)
+                fgot = inf.posterior_derived_quants[s,fname]
+                println("Sample ",s, " posterior_derived_quants ", fname, " got ", fgot, " expect ", fexpect)
+                if(!near(fgot,fexpect)); error("Failed reproduction test"); end
+            end
+        end       
+        
         if(output_chains)
             got = summarize(inf.chains[s], mean, std)
             expect = summarize(chain, mean, std)
@@ -223,6 +235,21 @@ function test_inference()
     println("Test with param_dist_properties unnamed lambda")
     inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var, (:my_second_unnamed_lambda,x->mean(x))], base_seed=1234)
 
+    function post_pred_sample(chain, rng)
+        samp = sample(rng,chain,10)
+        asamp = get(samp, :a)
+        avg_model = zeros(obs_sz)
+        for a in asamp
+            avg_model .+= a .* d ./ 10  #d are the x-coords
+        end
+        return avg_model
+    end
+    println("Test with posterior_operations sampling the posterior predictive distribution")
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, posterior_operations=[post_pred_sample], base_seed=1234)
+    
+    println("Test with posterior_operations sampling the posterior predictive distribution and alias")
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, posterior_operations=[(:myalias,post_pred_sample)], base_seed=1234)
+    
 end
 
 function test_base_seed_increment()
