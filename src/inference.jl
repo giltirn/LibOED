@@ -9,14 +9,14 @@ struct InferenceResult
     base_seed::Int64 #the base seed used by the internal RNGs. The seed for a given chain is base_seed + chain_idx
 end
 
-function getFuncName(f::Tuple{AbstractString,Function})
+function getFuncName(f::Tuple{Symbol,Function})
     return f[1]
 end
 function getFuncName(f::Function)
-    return String(nameof(f))
+    return nameof(f)
 end
 
-function getFunc(f::Tuple{AbstractString,Function})
+function getFunc(f::Tuple{Symbol,Function})
     return f[2]
 end
 function getFunc(f::Function)
@@ -24,7 +24,7 @@ function getFunc(f::Function)
 end
 
 
-function InferenceResult(dist_properties_funcs, param_dist_properties_funcs, param_list::Vector{String}, n::Integer, output_chains::Bool, base_seed::Int64)
+function InferenceResult_(dist_properties_funcs, param_dist_properties_funcs, param_list::Vector{Symbol}, n::Integer, output_chains::Bool, base_seed::Int64)
     fcolnames = [getFuncName(f) for f in dist_properties_funcs]
     pcolnames = [getFuncName(f) for f in param_dist_properties_funcs]
 
@@ -34,29 +34,13 @@ function InferenceResult(dist_properties_funcs, param_dist_properties_funcs, par
     o_avg_param_dist_properties = NamedArray(Any,0,0)
     
     if(length(fcolnames)>0)
-        o_dist_properties = NamedArray(Any, n, length(fcolnames))
-        setdimnames!(o_dist_properties, "Sample", 1)
-        setdimnames!(o_dist_properties, "Statistic", 2)
-        setnames!(o_dist_properties, fcolnames, 2)
-        
-        o_avg_dist_properties = NamedArray(Any, length(fcolnames))
-        setdimnames!(o_avg_dist_properties, "Statistic", 1)
-        setnames!(o_avg_dist_properties, fcolnames, 1)
+        o_dist_properties = NamedArray( Array{Any,2}(undef, n, length(fcolnames)); names=([string(i) for i in 1:n], fcolnames), dimnames=(:Sample,:Statistic) )
+        o_avg_dist_properties = NamedArray( Vector{Any}(undef, length(fcolnames)); names=(fcolnames,), dimnames=(:Statistic,) )
     end
 
     if(length(pcolnames)>0)
-        o_param_dist_properties = NamedArray(Any, n, length(param_list), length(pcolnames))
-        setdimnames!(o_param_dist_properties, "Sample", 1)
-        setdimnames!(o_param_dist_properties, "Param", 2)
-        setnames!(o_param_dist_properties, param_list, 2)
-        setdimnames!(o_param_dist_properties, "Statistic", 3)
-        setnames!(o_param_dist_properties, pcolnames, 3)
-        
-        o_avg_param_dist_properties = NamedArray(Any, length(param_list), length(pcolnames))
-        setdimnames!(o_avg_param_dist_properties, "Param", 1)
-        setnames!(o_avg_param_dist_properties, param_list, 1)
-        setdimnames!(o_avg_param_dist_properties, "Statistic", 2)
-        setnames!(o_avg_param_dist_properties, pcolnames, 2)
+        o_param_dist_properties = NamedArray( Array{Any,3}(undef, n, length(param_list), length(pcolnames)); names=([string(i) for i in 1:n], param_list, pcolnames), dimnames=(:Sample,:Param,:Statistic) )
+        o_avg_param_dist_properties = NamedArray( Array{Any,2}(undef, length(param_list), length(pcolnames)); names=(param_list, pcolnames), dimnames=(:Param,:Statistic) )
     end
         
     return InferenceResult(o_dist_properties, o_avg_dist_properties, o_param_dist_properties, o_avg_param_dist_properties, 
@@ -70,7 +54,7 @@ function replace_param_names!(inf::InferenceResult, dict::AbstractDict)
         pnames = names(inf.param_dist_properties,2)
         println("Original parameters: ",pnames)
         for i in 1:length(pnames)
-            if(haskey(dict,pnames[i])); pnames[i] = String(dict[pnames[i]]); end
+            if(haskey(dict,pnames[i])); pnames[i] = dict[pnames[i]]; end
         end
         println("New parameters: ", pnames)
         setnames!(inf.param_dist_properties, pnames, 2)
@@ -92,8 +76,9 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
 
     thr_dist_prop = nothing
     if(length(dist_properties)>0)
-        thr_dist_prop = NamedArray(Any, n, length(dist_properties)) #[chain idx, func idx]
-        setnames!(thr_dist_prop, [getFuncName(f) for f in dist_properties], 2)
+        rnames = [string(i) for i in 1:n]
+        cnames = [getFuncName(f) for f in dist_properties]
+        thr_dist_prop = NamedArray(Array{Any,2}(undef, n, length(dist_properties)); names=(rnames,cnames) ) #[chain idx, func idx]
     end
 
     thr_pdist_prop = nothing
@@ -125,15 +110,13 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
             fnames = [ getFuncName(f) for f in param_dist_properties ]
             funcs = [ getFunc(f) for f in param_dist_properties ]
             
-            S = summarize(chain, funcs...; func_names=[Symbol(fn) for fn in fnames])
+            S = summarize(chain, funcs...; func_names=fnames)
             cparams = chain.name_map.parameters
-            thr_pdist_prop[c] = NamedArray(Any, length(chain.name_map.parameters), length(param_dist_properties) )
-            setnames!(thr_pdist_prop[c], [String(f) for f in chain.name_map.parameters], 1)
-            setnames!(thr_pdist_prop[c], fnames, 2)
+            thr_pdist_prop[c] = NamedArray( Array{Any}(undef, length(chain.name_map.parameters), length(param_dist_properties) ); names=(chain.name_map.parameters, fnames) )
             
             for f in param_dist_properties
                 for p in cparams
-                    thr_pdist_prop[c][String(p),getFuncName(f)] = getindex(S,p,Symbol(getFuncName(f)))
+                    thr_pdist_prop[c][p,getFuncName(f)] = getindex(S,p,getFuncName(f))
                 end
             end           
         end        
@@ -151,11 +134,10 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         pkeys=names(thr_pdist_prop[1],1)
         for c in 2:n
             if names(thr_pdist_prop[c],1) != pkeys; error("Name mismatch, got ", names(thr_pdist_prop[c],1), " expect ", pkeys); end
-        end
-        thr_pdist_prop_reord = NamedArray(Any, n, length(pkeys), length(param_dist_properties))
-        setnames!(thr_pdist_prop_reord, pkeys, 2)
-        setnames!(thr_pdist_prop_reord, [getFuncName(f) for f in param_dist_properties], 3)
-
+        end        
+        fkeys = [getFuncName(f) for f in param_dist_properties]
+        
+        thr_pdist_prop_reord = NamedArray( Array{Any,3}(undef, n, length(pkeys), length(param_dist_properties)); names=( [string(i) for i in 1:n], pkeys, fkeys ) )
         for c in 1:n
             thr_pdist_prop_reord[c, :, :] = thr_pdist_prop[c][:,:]
         end        
@@ -246,7 +228,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     #Get the list of params so we can initialize output (only needed if using param_dist_properties)
-    param_list = Vector{String}()
+    param_list = Vector{Symbol}()
     if(length(param_dist_properties) > 0)
         if(work[1] == 0); error("Expect first proc to have work"); end
         param_list = names(results[1][2],2)
@@ -254,7 +236,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     #Initialize output
-    out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
+    out = InferenceResult_(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
     
     #Extract and combine data   
     dfkeys = [getFuncName(f) for f in dist_properties]

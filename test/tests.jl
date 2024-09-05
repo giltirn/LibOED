@@ -76,8 +76,8 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     println("Running chains separately for reproduction")
     nsamp = size(obs,2)   
 
-    dmean = Dict{String,Any}()   
-    pmean = Dict{String,Dict{String,Float64}}()
+    dmean = Dict{Symbol,Any}()   
+    pmean = Dict{Symbol,Dict{Symbol,Float64}}()
     
     for s in 1:nsamp
         sobs = obs[:,s]
@@ -88,15 +88,8 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
         if(dist_properties != nothing)
             Q = generated_quantities(model(sobs,driver), Turing.MCMCChains.get_sections(chain, :parameters))
             for f in dist_properties
-                fname=nothing
-                fexpect = nothing
-                if(isa(f, Tuple{AbstractString,Function}))
-                    fname = f[1]
-                    fexpect = f[2](Q)
-                else                
-                    fname=String(nameof(f))
-                    fexpect = f(Q)
-                end
+                fname=isa(f,Function) ? nameof(f) : f[1]
+                fexpect=isa(f,Function) ? f(Q) : f[2](Q)               
                 fgot=inf.dist_properties[s,fname]
                 println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
                 if(!near(fexpect,fgot)); error("Failed reproduction test"); end
@@ -123,23 +116,23 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
         end
         if(param_dist_properties != nothing)
             funcs = [ isa(f,Function) ? f : f[2] for f in param_dist_properties ]
-            fnames = [ isa(f,Function) ? nameof(f) : Symbol(f[1]) for f in param_dist_properties ]
+            fnames = [ isa(f,Function) ? nameof(f) : f[1] for f in param_dist_properties ]
             
             S = summarize(chain, funcs...; func_names=fnames)
             for f in param_dist_properties
-                fname= isa(f,Function) ? String(nameof(f)) : f[1]
-                if(s==1); pmean[fname] = Dict{String,Float64}(); end
+                fname= isa(f,Function) ? nameof(f) : f[1]
+                if(s==1); pmean[fname] = Dict{Symbol,Float64}(); end
                 
                 for p in chain.name_map.parameters
-                    fexpect = getindex(S,p,Symbol(fname))
-                    fgot=inf.param_dist_properties[s,String(p),fname]
-                    println("Sample ",s, " param_dist_properties ", fname, " ", String(p), " got ", fgot, " expect ", fexpect)
+                    fexpect = getindex(S,p,fname)
+                    fgot=inf.param_dist_properties[s,p,fname]
+                    println("Sample ",s, " param_dist_properties ", fname, " ", p, " got ", fgot, " expect ", fexpect)
                     if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
 
                     if(s==1)
-                        pmean[fname][String(p)] = fexpect
+                        pmean[fname][p] = fexpect
                     else
-                        pmean[fname][String(p)] += fexpect
+                        pmean[fname][p] += fexpect
                     end
                 end
             end
@@ -163,7 +156,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     if(dist_properties != nothing)
         println("Checking dist_properties averages")
         for f in dist_properties
-            fname=isa(f,Tuple{AbstractString,Function}) ? f[1] : String(nameof(f))
+            fname=isa(f,Function) ? nameof(f) : f[1]
             if(dmean[fname] != nothing)
                 fexpect = dmean[fname] / nsamp
                 fgot = inf.avg_dist_properties[fname]
@@ -176,7 +169,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     if(param_dist_properties != nothing)
         println("Checking param_dist_properties averages")
         for f in param_dist_properties
-            fname=isa(f,Function) ? String(nameof(f)) : f[1]
+            fname=isa(f,Function) ? nameof(f) : f[1]
             for p in keys(pmean[fname])                         
                 fexpect = pmean[fname][p] / nsamp
                 fgot = inf.avg_param_dist_properties[p,fname]
@@ -226,9 +219,9 @@ function test_inference()
     println("Test with model with matrix return type")
     inference_repro_test(test_inference_model_matrix_return,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=nothing, base_seed=1234)
     println("Test with dist_properties unnamed lambda")
-    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var, ("my_unnamed_lambda",x->mean(x))], param_dist_properties=nothing, base_seed=1234)
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var, (:my_unnamed_lambda,x->mean(x))], param_dist_properties=nothing, base_seed=1234)
     println("Test with param_dist_properties unnamed lambda")
-    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var, ("my_second_unnamed_lambda",x->mean(x))], base_seed=1234)
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var, (:my_second_unnamed_lambda,x->mean(x))], base_seed=1234)
 
 end
 
@@ -286,18 +279,18 @@ function test_replace_param_names()
     p1_2 = names(inf.avg_param_dist_properties,1)
     p1_3 = inf.chains[1].name_map.parameters
     println(p1_1, p1_2, p1_3)
-    for nm in ["σ","p[1]","p[2]"]
-        if( nm ∉  p1_1 || nm ∉  p1_2 || Symbol(nm) ∉ p1_3 ); error("Unexpected initial params, could not find ", nm); end
+    for nm in [:σ,Symbol("p[1]"),Symbol("p[2]")]
+        if( nm ∉  p1_1 || nm ∉  p1_2 || nm ∉ p1_3 ); error("Unexpected initial params, could not find ", nm); end
     end
    
-    replace_param_names!(inf, Dict("p[1]"=>"ρ","p[2]"=>"κ"))
+    replace_param_names!(inf, Dict(Symbol("p[1]")=>:ρ,Symbol("p[2]")=>:κ))
     
     p2_1 = names(inf.param_dist_properties,2)
     p2_2 = names(inf.avg_param_dist_properties,1)
     p2_3 = inf.chains[1].name_map.parameters
     println(p2_1, p2_2, p2_3)
-    for nm in ["σ","ρ","κ"]
-        if( nm ∉  p2_1 || nm ∉  p2_2 || Symbol(nm) ∉ p2_3 ); error("Unexpected result params, could not find ", nm); end
+    for nm in [:σ,:ρ,:κ]
+        if( nm ∉  p2_1 || nm ∉  p2_2 || nm ∉ p2_3 ); error("Unexpected result params, could not find ", nm); end
     end
     println("test_replace_param_names passed")    
 end
