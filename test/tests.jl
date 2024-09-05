@@ -88,8 +88,15 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
         if(dist_properties != nothing)
             Q = generated_quantities(model(sobs,driver), Turing.MCMCChains.get_sections(chain, :parameters))
             for f in dist_properties
-                fname=String(nameof(f))
-                fexpect = f(Q)               
+                fname=nothing
+                fexpect = nothing
+                if(isa(f, Tuple{AbstractString,Function}))
+                    fname = f[1]
+                    fexpect = f[2](Q)
+                else                
+                    fname=String(nameof(f))
+                    fexpect = f(Q)
+                end
                 fgot=inf.dist_properties[s,fname]
                 println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
                 if(!near(fexpect,fgot)); error("Failed reproduction test"); end
@@ -115,13 +122,16 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
 
         end
         if(param_dist_properties != nothing)
-            S = summarize(chain, param_dist_properties...)
+            funcs = [ isa(f,Function) ? f : f[2] for f in param_dist_properties ]
+            fnames = [ isa(f,Function) ? nameof(f) : Symbol(f[1]) for f in param_dist_properties ]
+            
+            S = summarize(chain, funcs...; func_names=fnames)
             for f in param_dist_properties
-                fname=String(nameof(f))
+                fname= isa(f,Function) ? String(nameof(f)) : f[1]
                 if(s==1); pmean[fname] = Dict{String,Float64}(); end
                 
                 for p in chain.name_map.parameters
-                    fexpect = getindex(S,p,nameof(f))
+                    fexpect = getindex(S,p,Symbol(fname))
                     fgot=inf.param_dist_properties[s,String(p),fname]
                     println("Sample ",s, " param_dist_properties ", fname, " ", String(p), " got ", fgot, " expect ", fexpect)
                     if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
@@ -153,7 +163,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     if(dist_properties != nothing)
         println("Checking dist_properties averages")
         for f in dist_properties
-            fname=String(nameof(f))
+            fname=isa(f,Tuple{AbstractString,Function}) ? f[1] : String(nameof(f))
             if(dmean[fname] != nothing)
                 fexpect = dmean[fname] / nsamp
                 fgot = inf.avg_dist_properties[fname]
@@ -166,7 +176,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     if(param_dist_properties != nothing)
         println("Checking param_dist_properties averages")
         for f in param_dist_properties
-            fname=String(nameof(f))
+            fname=isa(f,Function) ? String(nameof(f)) : f[1]
             for p in keys(pmean[fname])                         
                 fexpect = pmean[fname][p] / nsamp
                 fgot = inf.avg_param_dist_properties[p,fname]
@@ -215,7 +225,11 @@ function test_inference()
     inference_repro_test(test_inference_model_pvec_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var], base_seed=1234)
     println("Test with model with matrix return type")
     inference_repro_test(test_inference_model_matrix_return,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=nothing, base_seed=1234)
-    
+    println("Test with dist_properties unnamed lambda")
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=[var, ("my_unnamed_lambda",x->mean(x))], param_dist_properties=nothing, base_seed=1234)
+    println("Test with param_dist_properties unnamed lambda")
+    inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=[var, ("my_second_unnamed_lambda",x->mean(x))], base_seed=1234)
+
 end
 
 function test_base_seed_increment()

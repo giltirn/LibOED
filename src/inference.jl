@@ -9,11 +9,24 @@ struct InferenceResult
     base_seed::Int64 #the base seed used by the internal RNGs. The seed for a given chain is base_seed + chain_idx
 end
 
-strf(f) = String(nameof(f))
+function getFuncName(f::Tuple{AbstractString,Function})
+    return f[1]
+end
+function getFuncName(f::Function)
+    return String(nameof(f))
+end
 
-function InferenceResult(dist_properties::Array{F,1}, param_dist_properties::Array{G,1}, param_list::Vector{String}, n::Integer, output_chains::Bool, base_seed::Int64) where {F<:Function,G<:Function}
-    fcolnames = [strf(f) for f in dist_properties]
-    pcolnames = [strf(f) for f in param_dist_properties]
+function getFunc(f::Tuple{AbstractString,Function})
+    return f[2]
+end
+function getFunc(f::Function)
+    return f
+end
+
+
+function InferenceResult(dist_properties_funcs, param_dist_properties_funcs, param_list::Vector{String}, n::Integer, output_chains::Bool, base_seed::Int64)
+    fcolnames = [getFuncName(f) for f in dist_properties_funcs]
+    pcolnames = [getFuncName(f) for f in param_dist_properties_funcs]
 
     o_dist_properties = NamedArray(Any,0,0)
     o_avg_dist_properties = NamedArray(Any,0)
@@ -80,7 +93,7 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
     thr_dist_prop = nothing
     if(length(dist_properties)>0)
         thr_dist_prop = NamedArray(Any, n, length(dist_properties)) #[chain idx, func idx]
-        setnames!(thr_dist_prop, [strf(f) for f in dist_properties], 2)
+        setnames!(thr_dist_prop, [getFuncName(f) for f in dist_properties], 2)
     end
 
     thr_pdist_prop = nothing
@@ -101,22 +114,26 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         #Properties of model return distribution
         if(length(dist_properties) > 0)        
             Q = generated_quantities(dist(y,driver), Turing.MCMCChains.get_sections(chain, :parameters))
+           
             for f in dist_properties
-                thr_dist_prop[c,strf(f)] = f(Q)
+                thr_dist_prop[c,getFuncName(f)] = getFunc(f)(Q)
             end
         end
 
         #Properties of parameter distributions
         if(length(param_dist_properties) > 0)
-            S = summarize(chain, param_dist_properties...)
+            fnames = [ getFuncName(f) for f in param_dist_properties ]
+            funcs = [ getFunc(f) for f in param_dist_properties ]
+            
+            S = summarize(chain, funcs...; func_names=[Symbol(fn) for fn in fnames])
             cparams = chain.name_map.parameters
             thr_pdist_prop[c] = NamedArray(Any, length(chain.name_map.parameters), length(param_dist_properties) )
             setnames!(thr_pdist_prop[c], [String(f) for f in chain.name_map.parameters], 1)
-            setnames!(thr_pdist_prop[c], [strf(f) for f in param_dist_properties], 2)
+            setnames!(thr_pdist_prop[c], fnames, 2)
             
             for f in param_dist_properties
                 for p in cparams
-                    thr_pdist_prop[c][String(p),strf(f)] = getindex(S,p,nameof(f))
+                    thr_pdist_prop[c][String(p),getFuncName(f)] = getindex(S,p,Symbol(getFuncName(f)))
                 end
             end           
         end        
@@ -137,7 +154,7 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
         end
         thr_pdist_prop_reord = NamedArray(Any, n, length(pkeys), length(param_dist_properties))
         setnames!(thr_pdist_prop_reord, pkeys, 2)
-        setnames!(thr_pdist_prop_reord, [strf(f) for f in param_dist_properties], 3)
+        setnames!(thr_pdist_prop_reord, [getFuncName(f) for f in param_dist_properties], 3)
 
         for c in 1:n
             thr_pdist_prop_reord[c, :, :] = thr_pdist_prop[c][:,:]
@@ -164,7 +181,7 @@ const global_base_seed = Ref{Int64}(1234)
 #dist: two-argument function that takes the y-sample and the driver; this is expected to wrap a Turing model
 #dist_properties: a list of functions that are applied for each chain to the distribution of model return values (obtained via generated_quantities)
 #base_seed: a RNG is seeded for each chain as base_seed + chain_idx
-function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties::Union{Nothing,Array{F,1}}=[var], param_dist_properties::Union{Nothing,Array{G,1}} = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )  where {F<:Function,G<:Function}
+function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
     
@@ -240,8 +257,8 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     out = InferenceResult(dist_properties, param_dist_properties, param_list, N_samp, output_chains, base_seed)
     
     #Extract and combine data   
-    dfkeys = [strf(f) for f in dist_properties]
-    pfkeys = [strf(f) for f in param_dist_properties]
+    dfkeys = [getFuncName(f) for f in dist_properties]
+    pfkeys = [getFuncName(f) for f in param_dist_properties]
     off = 0
     for i in 1:nproc
         if work[i] > 0
