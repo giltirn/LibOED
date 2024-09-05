@@ -44,6 +44,26 @@ end
     return mean(m) # outputs mean of model
 end
 
+#This returns the matrix y
+@everywhere @model function test_inference_model_matrix_return(y, d)
+    σ ~ LogNormal(log(1), log(2)/2) #data noise
+    a ~ Normal(1.2,2) #parameter with prior
+    m = a * d    
+    y ~ MvNormal(m, σ*I) #y=2d + eps
+end
+
+function near(a::T, b::T) where T <: Number
+    return abs(a - b) < 1e-8
+end
+function near(a::Vector{T}, b::Vector{T}) where T <: Number
+    if(length(a) != length(b)); return false; end
+    for (x, y) in zip(a, b)
+        if(!near(x,y)); return false; end
+    end
+    return true;
+end
+
+
 
 function inference_repro_test(model,driver,obs; chain_length=100,dist_properties=nothing, param_dist_properties=nothing, output_chains=false, base_seed=1234)
     println("Running inference using LibOED")
@@ -56,7 +76,7 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
     println("Running chains separately for reproduction")
     nsamp = size(obs,2)   
 
-    dmean = Dict{String,Float64}()
+    dmean = Dict{String,Any}()   
     pmean = Dict{String,Dict{String,Float64}}()
     
     for s in 1:nsamp
@@ -72,12 +92,24 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
                 fexpect = f(Q)               
                 fgot=inf.dist_properties[s,fname]
                 println("Sample ",s, " dist_properties ", fname, " got ", fgot, " expect ", fexpect)
-                if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+                if(!near(fexpect,fgot)); error("Failed reproduction test"); end
 
-                if(s==1)
-                    dmean[fname] = fexpect
+                mean_defined = true
+                try
+                    test = mean([fexpect,fexpect])
+                catch e
+                    println("Mean is not defined for data type ",typeof(fexpect))
+                    mean_defined = false
+                end
+                    
+                if(mean_defined)
+                    if(s==1)
+                        dmean[fname] = fexpect
+                    else
+                        dmean[fname] += fexpect
+                    end
                 else
-                    dmean[fname] += fexpect
+                    dmean[fname] = nothing
                 end
             end
 
@@ -122,10 +154,12 @@ function inference_repro_test(model,driver,obs; chain_length=100,dist_properties
         println("Checking dist_properties averages")
         for f in dist_properties
             fname=String(nameof(f))
-            fexpect = dmean[fname] / nsamp
-            fgot = inf.avg_dist_properties[fname]
-            println(fname," got ",fgot," expect ",fexpect)
-            if(abs(fexpect-fgot) > 1e-8); error("Failed reproduction test"); end
+            if(dmean[fname] != nothing)
+                fexpect = dmean[fname] / nsamp
+                fgot = inf.avg_dist_properties[fname]
+                println(fname," got ",fgot," expect ",fexpect)
+                if(!near(fexpect,fgot)); error("Failed reproduction test"); end
+            end
         end
     end
 
@@ -179,6 +213,9 @@ function test_inference()
     inference_repro_test(test_inference_model_dist,d, y, chain_length=100, dist_properties=nothing, param_dist_properties=nothing, base_seed=1234, output_chains=true)
     println("Test with model with arraydist param")
     inference_repro_test(test_inference_model_pvec_dist,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=[var], base_seed=1234)
+    println("Test with model with matrix return type")
+    inference_repro_test(test_inference_model_matrix_return,d, y, chain_length=100, dist_properties=[mean], param_dist_properties=nothing, base_seed=1234)
+    
 end
 
 function test_base_seed_increment()
@@ -328,5 +365,5 @@ test_replace_param_names()
 
 
 #TODO:
-#Test inference works for models that have no return type
+#Test inference works for models that have nothing return type
 #Test inference works for models that have tuple return types

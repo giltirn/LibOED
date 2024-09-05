@@ -280,7 +280,14 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
 
     #Averages for dist_properties
     for fkey in dfkeys
-        out.avg_dist_properties[fkey] = mean(out.dist_properties[:,fkey])
+        #Depending on the generated_quantities type for the Turing model, the concept of mean may be undefined; in which case we set the entry to nothing
+        try
+            v = Vector(out.dist_properties[:,fkey])
+            out.avg_dist_properties[fkey] = mean(v)
+            #out.avg_dist_properties[fkey] = mean(out.dist_properties[:,fkey]) #sometimes fails MethodError: no method matching length(::Colon)
+        catch
+            out.avg_dist_properties[fkey] = nothing
+        end
     end
 
     #Averages for param_dist_properties
