@@ -81,8 +81,8 @@ end
 
 
 #Run n chains on the worker, where n is length(y_samples)
-function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains::Bool)
-    n = length(y_samples)
+function worker_func(dist, inputs, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains::Bool, initialize_MAP::Bool)
+    n = length(inputs)
     rnames = [string(i) for i in 1:n]    
     
     thr_dist_prop = length(dist_properties)>0 ?
@@ -99,13 +99,23 @@ function worker_func(dist, driver, y_samples, chain_idx_offset, chain_length, ba
     chains = output_chains ? Vector{Any}(undef, n) : nothing
     
     @threads for c in 1:n
-        y = y_samples[c]
+        y = inputs[c]
         rng=Xoshiro(base_seed + chain_idx_offset + c)
-        chain = sample(rng, dist(y,driver), mcmc_sampler, chain_length)
+        turing_model = dist(y)
+        
+        if(initialize_MAP)
+            println("Generating maximum a priori initialization for worker chain ",c)
+            map_estimate = maximum_a_posteriori(turing_model)
+            println("Sampling worker chain ",c)
+            chain = sample(rng, turing_model, mcmc_sampler, chain_length; initial_params=map_estimate.values.array)
+        else
+            println("Sampling worker chain ",c)
+            chain = sample(rng, turing_model, mcmc_sampler, chain_length)
+        end
 
         #Properties of model return distribution
         if(length(dist_properties) > 0)        
-            Q = generated_quantities(dist(y,driver), Turing.MCMCChains.get_sections(chain, :parameters))
+            Q = generated_quantities(turing_model, Turing.MCMCChains.get_sections(chain, :parameters))
            
             for f in dist_properties
                 thr_dist_prop[c,getFuncName(f)] = getFunc(f)(Q)
@@ -174,13 +184,16 @@ end
 
 const global_base_seed = Ref{Int64}(1234)
 
-#dist: two-argument function that takes the y-sample and the driver; this is expected to wrap a Turing model
+#dist: single-argument function that takes the Turing model inputs (e.g. controls and observations); this is expected to wrap a Turing model
+#N_chain : the number of chains
+#input_sampler: single-argument function returning the Turing model inputs for a given chain index
 #dist_properties: a list of functions that are applied for each chain to the distribution of model return values (obtained via generated_quantities)
 #param_dist_properties: a list of functions that are applied over the posterior samples of each parameter
 #posterior_operations : a list of functions that are applied to the output posterior chains. Function signature should be Function(::Chains, ::AbstractRNG)
 #base_seed: a RNG is seeded for each chain as base_seed + chain_idx
-function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65),
-    dist_properties=[var], param_dist_properties = nothing, posterior_operations = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] )
+#initialize_MAP: use a maximum a priori sampler to initialize the model parameters
+function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65),
+    dist_properties=[var], param_dist_properties = nothing, posterior_operations = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[], initialize_MAP::Bool=false )
     
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
@@ -191,9 +204,9 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     nproc = nprocs()
-    work = divide_work(N_samp, nproc)
+    work = divide_work(N_chain, nproc)
 
-    println("Dividing ",N_samp, " samples over ",nproc, " processors")
+    println("Dividing ",N_chain, " chains over ",nproc, " processors")
     println("Work distribution: ")
     for i in 1:nproc
         print(i,":",work[i]," ")
@@ -212,22 +225,22 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
         off = work[1]
         for i in 2:nproc
             if work[i] > 0
-                y_samples = Array{Any}(undef, work[i]) #generate the y_samples for the process here so they can be automatically copied to the remote process
+                inputs = Array{Any}(undef, work[i]) #generate the y_samples for the process here so they can be automatically copied to the remote process
                 for c in 1:work[i]
-                    y_samples[c] = y_sampler(off + c)
+                    inputs[c] = input_sampler(off + c)
                 end
-                wf[i] = @spawnat i worker_func(dist, driver, y_samples, off, chain_length, base_seed,
-                                               mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
+                wf[i] = @spawnat i worker_func(dist, inputs, off, chain_length, base_seed,
+                                               mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
                 off += work[i]
             end
         end
         if work[1] > 0 #main process
-            y_samples = Array{Any}(undef, work[1])
+            inputs = Array{Any}(undef, work[1])
             for c in 1:work[1]
-                y_samples[c] = y_sampler(c)
+                inputs[c] = input_sampler(c)
             end
-            wf[1] = @spawnat 1 worker_func(dist, driver, y_samples, 0, chain_length, base_seed,
-                                           mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
+            wf[1] = @spawnat 1 worker_func(dist, inputs, 0, chain_length, base_seed,
+                                           mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
         end
 
         #Fetch results after main process has finished
@@ -242,10 +255,10 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
         end
         
     else
-        if(work[1] != N_samp); error("Work division error for single process"); end
-        y_samples = [ y_sampler(c) for c in 1:N_samp ]
-        results[1] = worker_func(dist,driver, y_samples, 0, chain_length, base_seed,
-                                 mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains)
+        if(work[1] != N_chain); error("Work division error for single process"); end
+        inputs = [ input_sampler(c) for c in 1:N_chain ]
+        results[1] = worker_func(dist, inputs, 0, chain_length, base_seed,
+                                 mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
     end
 
     #Get the list of params so we can initialize output (only needed if using param_dist_properties)
@@ -257,7 +270,7 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     #Initialize output
-    out = InferenceResult_(dist_properties, param_dist_properties, posterior_operations, param_list, N_samp, output_chains, base_seed)
+    out = InferenceResult_(dist_properties, param_dist_properties, posterior_operations, param_list, N_chain, output_chains, base_seed)
     
     #Extract and combine data   
     dfkeys = [getFuncName(f) for f in dist_properties]
@@ -327,14 +340,17 @@ function simulate_inference(dist, driver, N_samp, y_sampler; chain_length=1000, 
     end
 
     #Increment global_base_seed to ensure next call uses different seed for all chains
-    global_base_seed[] += N_samp
+    global_base_seed[] += N_chain
     
     return out
 end
 
+#dist: two-argument function taking  1) the sample observation and 2) the driver (same over all samples)
 #y_samples: 2-d array with samples in columns
 function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, posterior_operations=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] ) where T<:Number
-    y_sampler(i) = y_samples[:,i]
+    y_sampler(i) = (y_samples[:,i], driver)
+    dwrp(inputs) = dist(inputs...)
+
     N_samp = size(y_samples,2) #number of columns
-    simulate_inference(dist, driver, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations, output_chains=output_chains, base_seed=base_seed)
+    simulate_inference(dwrp, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations, output_chains=output_chains, base_seed=base_seed)
 end
