@@ -81,7 +81,7 @@ end
 
 
 #Run n chains on the worker, where n is length(y_samples)
-function worker_func(dist, inputs, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains::Bool, initialize_MAP::Bool)
+function worker_func(dist, inputs, chain_idx_offset, chain_length, base_seed, mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains::Bool, initialize_MAP::Bool, thread_block_size::Int64)
     n = length(inputs)
     rnames = [string(i) for i in 1:n]    
     
@@ -97,64 +97,83 @@ function worker_func(dist, inputs, chain_idx_offset, chain_length, base_seed, mc
         NamedArray(Array{Any,2}(undef, n, length(posterior_operations)); names=(rnames,[getFuncName(f) for f in posterior_operations])) : nothing   #[chain idx, func name]
     
     chains = output_chains ? Vector{Any}(undef, n) : nothing
-    
-    @threads for c in 1:n
-        y = inputs[c]
-        rng=Xoshiro(base_seed + chain_idx_offset + c)
-        turing_model = dist(y)
-        
-        if(initialize_MAP)
-            println("Generating maximum a priori initialization for worker chain ",c)
-            map_estimate = maximum_a_posteriori(turing_model)
-            println("Sampling worker chain ",c)
-            chain = sample(rng, turing_model, mcmc_sampler, chain_length; initial_params=map_estimate.values.array)
-        else
-            println("Sampling worker chain ",c)
-            chain = sample(rng, turing_model, mcmc_sampler, chain_length)
-        end
 
-        #Properties of model return distribution
-        if(length(dist_properties) > 0)        
-            Q = generated_quantities(turing_model, Turing.MCMCChains.get_sections(chain, :parameters))
-           
-            for f in dist_properties
-                thr_dist_prop[c,getFuncName(f)] = getFunc(f)(Q)
-            end
-        end
-
-        #Properties of parameter distributions
-        if(length(param_dist_properties) > 0)
-            fnames = [ getFuncName(f) for f in param_dist_properties ]
-            funcs = [ getFunc(f) for f in param_dist_properties ]
-            
-            S = summarize(chain, funcs...; func_names=fnames)
-            cparams = chain.name_map.parameters
-            thr_pdist_prop[c] = NamedArray( Array{Any}(undef, length(chain.name_map.parameters), length(param_dist_properties) ); names=(chain.name_map.parameters, fnames) )
-            
-            for f in param_dist_properties
-                for p in cparams
-                    thr_pdist_prop[c][p,getFuncName(f)] = getindex(S,p,getFuncName(f))
-                end
-            end           
-        end
-
-        #Operations performed on the posterior chain
-        if(length(posterior_operations) > 0)
-            for f in posterior_operations
-                thr_post_op[c,getFuncName(f)] = getFunc(f)(chain, rng)
-            end
-        end        
-
-        #Optional returning of full chain
-        if(output_chains); chains[c] = chain; end
-        
+    if(thread_block_size <= 0 || thread_block_size > Threads.nthreads())
+        thread_block_size = Threads.nthreads()
     end
+    
+    blocks = div(n + thread_block_size - 1, thread_block_size)
+    off = 0
+    for b in 1:blocks
+        bs = min(thread_block_size, n-off)
+        
+        @threads for cc in 1:bs
+            c = cc + off
+            
+            y = inputs[c]
+            rng=Xoshiro(base_seed + chain_idx_offset + c)
+            turing_model = dist(y)
+            
+            if(initialize_MAP)
+                println("Generating maximum a priori initialization for worker chain ",c)
+                map_estimate = maximum_a_posteriori(turing_model)
+                println("Sampling worker chain ",c)
+                chain = sample(rng, turing_model, mcmc_sampler, chain_length; initial_params=map_estimate.values.array)
+            else
+                println("Sampling worker chain ",c)
+                chain = sample(rng, turing_model, mcmc_sampler, chain_length)
+            end
 
+            #Properties of model return distribution
+            if(length(dist_properties) > 0)        
+                Q = generated_quantities(turing_model, Turing.MCMCChains.get_sections(chain, :parameters))
+                
+                for f in dist_properties
+                    thr_dist_prop[c,getFuncName(f)] = getFunc(f)(Q)
+                end
+            end
+
+            #Properties of parameter distributions
+            if(length(param_dist_properties) > 0)
+                fnames = [ getFuncName(f) for f in param_dist_properties ]
+                funcs = [ getFunc(f) for f in param_dist_properties ]
+                
+                S = summarize(chain, funcs...; func_names=fnames)
+                cparams = chain.name_map.parameters
+                thr_pdist_prop[c] = NamedArray( Array{Any}(undef, length(chain.name_map.parameters), length(param_dist_properties) ); names=(chain.name_map.parameters, fnames) )
+                
+                for f in param_dist_properties
+                    for p in cparams
+                        thr_pdist_prop[c][p,getFuncName(f)] = getindex(S,p,getFuncName(f))
+                    end
+                end           
+            end
+
+            #Operations performed on the posterior chain
+            if(length(posterior_operations) > 0)
+                for f in posterior_operations
+                    thr_post_op[c,getFuncName(f)] = getFunc(f)(chain, rng)
+                end
+            end        
+
+            #Optional returning of full chain
+            if(output_chains); chains[c] = chain; end
+            
+        end #thread loop
+        off += bs
+    end
    
     #reorder thr_pdist_prop
     thr_pdist_prop_reord = nothing
     if(length(param_dist_properties) > 0)
         #check all chains agree on params list
+        if(length(thr_pdist_prop) == 0)
+            throw(string("thr_pdist_prop size is zero but param_dist_properties has length ",length(param_dist_properties)))
+        end
+        if(thr_pdist_prop === nothing)
+            throw(string("thr_pdist_prop is nothing"))
+        end
+            
         pkeys=names(thr_pdist_prop[1],1)
         for c in 2:n
             if names(thr_pdist_prop[c],1) != pkeys; error("Name mismatch, got ", names(thr_pdist_prop[c],1), " expect ", pkeys); end
@@ -192,8 +211,13 @@ const global_base_seed = Ref{Int64}(1234)
 #posterior_operations : a list of functions that are applied to the output posterior chains. Function signature should be Function(::Chains, ::AbstractRNG)
 #base_seed: a RNG is seeded for each chain as base_seed + chain_idx
 #initialize_MAP: use a maximum a priori sampler to initialize the model parameters
-function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcmc_sampler=NUTS(0.65),
-    dist_properties=[var], param_dist_properties = nothing, posterior_operations = nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[], initialize_MAP::Bool=false )
+#thread_block_size: limit the number of threads used in parallel on a given processor, up to the maximum threads allocated at startup. A value <=0 (default) will use all available threads.
+#max_procs : limit the number of processors used up the maximum. A value <=0 (default) will use all available processors
+function simulate_inference(dist, N_chain, input_sampler;
+                            chain_length=1000, mcmc_sampler=NUTS(0.65),
+                            dist_properties=[var], param_dist_properties = nothing, posterior_operations = nothing,
+                            output_chains::Bool=false, base_seed::Int64=global_base_seed[], initialize_MAP::Bool=false, thread_block_size::Int64=-1,
+                            max_procs::Int64=-1)
     
     if(dist_properties === nothing); dist_properties = Array{Function,1}(); end
     if(param_dist_properties === nothing); param_dist_properties = Array{Function,1}(); end
@@ -204,6 +228,10 @@ function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcm
     end
 
     nproc = nprocs()
+    if(max_procs > 0)
+        nproc = max_procs
+    end
+    
     work = divide_work(N_chain, nproc)
 
     println("Dividing ",N_chain, " chains over ",nproc, " processors")
@@ -230,7 +258,7 @@ function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcm
                     inputs[c] = input_sampler(off + c)
                 end
                 wf[i] = @spawnat i worker_func(dist, inputs, off, chain_length, base_seed,
-                                               mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
+                                               mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP, thread_block_size)
                 off += work[i]
             end
         end
@@ -240,7 +268,7 @@ function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcm
                 inputs[c] = input_sampler(c)
             end
             wf[1] = @spawnat 1 worker_func(dist, inputs, 0, chain_length, base_seed,
-                                           mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
+                                           mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP, thread_block_size)
         end
 
         #Fetch results after main process has finished
@@ -258,7 +286,7 @@ function simulate_inference(dist, N_chain, input_sampler; chain_length=1000, mcm
         if(work[1] != N_chain); error("Work division error for single process"); end
         inputs = [ input_sampler(c) for c in 1:N_chain ]
         results[1] = worker_func(dist, inputs, 0, chain_length, base_seed,
-                                 mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP)
+                                 mcmc_sampler, dist_properties, param_dist_properties, posterior_operations, output_chains, initialize_MAP, thread_block_size)
     end
 
     #Get the list of params so we can initialize output (only needed if using param_dist_properties)
@@ -347,10 +375,10 @@ end
 
 #dist: two-argument function taking  1) the sample observation and 2) the driver (same over all samples)
 #y_samples: 2-d array with samples in columns
-function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, posterior_operations=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[] ) where T<:Number
+function simulate_inference(dist, driver, y_samples::AbstractMatrix{T}; chain_length=1000, mcmc_sampler=NUTS(0.65), dist_properties=[var], param_dist_properties=nothing, posterior_operations=nothing, output_chains::Bool=false, base_seed::Int64=global_base_seed[], thread_block_size::Int64=-1 ) where T<:Number
     y_sampler(i) = (y_samples[:,i], driver)
     dwrp(inputs) = dist(inputs...)
 
     N_samp = size(y_samples,2) #number of columns
-    simulate_inference(dwrp, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations, output_chains=output_chains, base_seed=base_seed)
+    simulate_inference(dwrp, N_samp, y_sampler; chain_length=chain_length, mcmc_sampler=mcmc_sampler, dist_properties=dist_properties, param_dist_properties=param_dist_properties, posterior_operations=posterior_operations, output_chains=output_chains, base_seed=base_seed, thread_block_size=thread_block_size)
 end
